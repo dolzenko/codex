@@ -99,6 +99,7 @@ mod bottom_pane;
 mod chatwidget;
 mod cli;
 mod clipboard_paste;
+mod clipboard_shortcut;
 mod clipboard_text;
 mod collaboration_modes;
 mod color;

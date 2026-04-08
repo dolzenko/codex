@@ -33,6 +33,50 @@ use std::process::Stdio;
 #[cfg(all(not(target_os = "android"), target_os = "linux"))]
 use crate::clipboard_paste::is_probably_wsl;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReadClipboardTextError {
+    ClipboardUnavailable(String),
+}
+
+impl std::fmt::Display for ReadClipboardTextError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadClipboardTextError::ClipboardUnavailable(msg) => {
+                write!(f, "clipboard unavailable: {msg}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ReadClipboardTextError {}
+
+pub(crate) fn is_ssh_session() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn read_text_from_clipboard() -> Result<Option<String>, ReadClipboardTextError> {
+    let error = match arboard::Clipboard::new() {
+        Ok(mut clipboard) => match clipboard.get_text() {
+            Ok(text) => return Ok((!text.is_empty()).then_some(text)),
+            Err(err) => err.to_string(),
+        },
+        Err(err) => err.to_string(),
+    };
+
+    #[cfg(target_os = "linux")]
+    if is_probably_wsl() {
+        return match read_text_via_wsl_clipboard() {
+            Ok(text) => Ok((!text.is_empty()).then_some(text)),
+            Err(wsl_err) => Err(ReadClipboardTextError::ClipboardUnavailable(format!(
+                "{error}; WSL fallback failed: {wsl_err}"
+            ))),
+        };
+    }
+
+    Err(ReadClipboardTextError::ClipboardUnavailable(error))
+}
+
 /// Copies user-visible text into the most appropriate clipboard for the
 /// current environment.
 ///
@@ -54,7 +98,7 @@ use crate::clipboard_paste::is_probably_wsl;
 /// unavailable or the fallback path also fails.
 #[cfg(not(target_os = "android"))]
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
-    if std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some() {
+    if is_ssh_session() {
         return copy_via_osc52(text);
     }
 
@@ -77,6 +121,32 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     };
 
     Err(error)
+}
+
+#[cfg(all(not(target_os = "android"), target_os = "linux"))]
+fn read_text_via_wsl_clipboard() -> Result<String, String> {
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $ErrorActionPreference = 'Stop'; $text = Get-Clipboard -Raw -Format Text; if ($null -eq $text) { exit 1 }; [Console]::Write($text)",
+        ])
+        .output()
+        .map_err(|e| format!("failed to spawn powershell.exe: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!(
+                "powershell.exe exited with status {}",
+                output.status
+            ))
+        } else {
+            Err(format!("powershell.exe failed: {stderr}"))
+        }
+    }
 }
 
 /// Writes text through OSC 52 so the controlling terminal can own the copy.

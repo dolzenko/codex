@@ -1,6 +1,86 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+fn shortcut_paste_text(
+    _request: crate::clipboard_shortcut::ShortcutPasteRequest,
+) -> crate::clipboard_shortcut::ShortcutPasteAction {
+    crate::clipboard_shortcut::ShortcutPasteAction::Text("hello from clipboard".to_string())
+}
+
+fn shortcut_paste_image(
+    _request: crate::clipboard_shortcut::ShortcutPasteRequest,
+) -> crate::clipboard_shortcut::ShortcutPasteAction {
+    crate::clipboard_shortcut::ShortcutPasteAction::Image {
+        path: PathBuf::from("/tmp/from-shortcut.png"),
+        info: crate::clipboard_paste::PastedImageInfo {
+            width: 120,
+            height: 80,
+            encoded_format: crate::clipboard_paste::EncodedImageFormat::Png,
+        },
+    }
+}
+
+fn shortcut_paste_error(
+    _request: crate::clipboard_shortcut::ShortcutPasteRequest,
+) -> crate::clipboard_shortcut::ShortcutPasteAction {
+    crate::clipboard_shortcut::ShortcutPasteAction::Error(
+        "Failed to paste clipboard contents: no text or image available on the clipboard."
+            .to_string(),
+    )
+}
+
+#[tokio::test]
+async fn ctrl_v_pastes_text_into_the_composer() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_shortcut_paste_handler_for_test(shortcut_paste_text);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+    assert_eq!(chat.bottom_pane.composer_text(), "hello from clipboard");
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn ctrl_v_can_attach_an_image_when_the_shortcut_policy_falls_back_to_image() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_shortcut_paste_handler_for_test(shortcut_paste_image);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+    assert_eq!(
+        chat.bottom_pane.composer_local_image_paths(),
+        vec![PathBuf::from("/tmp/from-shortcut.png")]
+    );
+    assert_eq!(chat.bottom_pane.composer_text(), "[Image #1]");
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn alt_v_uses_the_same_shortcut_paste_resolution_path() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_shortcut_paste_handler_for_test(shortcut_paste_text);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+
+    assert_eq!(chat.bottom_pane.composer_text(), "hello from clipboard");
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn ctrl_v_reports_a_user_visible_error_when_clipboard_paste_fails() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_shortcut_paste_handler_for_test(shortcut_paste_error);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("Failed to paste clipboard contents"));
+}
+
 #[tokio::test]
 async fn submission_preserves_text_elements_and_local_images() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;

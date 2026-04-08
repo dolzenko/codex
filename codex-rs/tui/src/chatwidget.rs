@@ -52,6 +52,9 @@ use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::bottom_pane::TerminalTitleSetupView;
+use crate::clipboard_shortcut::ShortcutPasteAction;
+use crate::clipboard_shortcut::ShortcutPasteRequest;
+use crate::clipboard_shortcut::resolve_shortcut_paste;
 use crate::mention_codec::LinkedMention;
 use crate::mention_codec::encode_history_mentions;
 use crate::model_catalog::ModelCatalog;
@@ -316,7 +319,6 @@ use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
-use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::clipboard_text;
 use crate::collaboration_modes;
 use crate::diff_render::display_path_for;
@@ -955,6 +957,8 @@ pub(crate) struct ChatWidget {
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
     last_non_retry_error: Option<(String, String)>,
+    #[cfg(test)]
+    shortcut_paste_handler: Option<fn(ShortcutPasteRequest) -> ShortcutPasteAction>,
 }
 
 /// Cached nickname and role for a collab agent thread, used to attach human-readable labels to
@@ -4716,6 +4720,8 @@ impl ChatWidget {
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_event: None,
             last_non_retry_error: None,
+            #[cfg(test)]
+            shortcut_paste_handler: None,
         };
 
         widget
@@ -4778,39 +4784,16 @@ impl ChatWidget {
                 self.quit_shortcut_expires_at = None;
                 self.quit_shortcut_key = None;
             }
-            KeyEvent {
-                code: KeyCode::Char(c),
-                modifiers,
-                kind: KeyEventKind::Press,
-                ..
-            } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                && c.eq_ignore_ascii_case(&'v') =>
-            {
-                match paste_image_to_temp_png() {
-                    Ok((path, info)) => {
-                        tracing::debug!(
-                            "pasted image size={}x{} format={}",
-                            info.width,
-                            info.height,
-                            info.encoded_format.label()
-                        );
-                        self.attach_image(path);
-                    }
-                    Err(err) => {
-                        tracing::warn!("failed to paste image: {err}");
-                        self.add_to_history(history_cell::new_error_event(format!(
-                            "Failed to paste image: {err}",
-                        )));
-                    }
-                }
-                return;
-            }
             other if other.kind == KeyEventKind::Press => {
                 self.bottom_pane.clear_quit_shortcut_hint();
                 self.quit_shortcut_expires_at = None;
                 self.quit_shortcut_key = None;
             }
             _ => {}
+        }
+
+        if self.handle_shortcut_paste_key(key_event) {
+            return;
         }
 
         if key_event.kind == KeyEventKind::Press
@@ -4924,6 +4907,63 @@ impl ChatWidget {
                 InputResult::None => {}
             },
         }
+    }
+
+    fn handle_shortcut_paste_key(&mut self, key_event: KeyEvent) -> bool {
+        let request = match key_event {
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && c.eq_ignore_ascii_case(&'v') =>
+            {
+                Some(if modifiers == KeyModifiers::ALT {
+                    ShortcutPasteRequest::AltV
+                } else {
+                    ShortcutPasteRequest::CtrlV
+                })
+            }
+            _ => None,
+        };
+
+        let Some(request) = request else {
+            return false;
+        };
+
+        let action = {
+            #[cfg(test)]
+            if let Some(handler) = self.shortcut_paste_handler {
+                handler(request)
+            } else {
+                resolve_shortcut_paste(request)
+            }
+
+            #[cfg(not(test))]
+            {
+                resolve_shortcut_paste(request)
+            }
+        };
+
+        match action {
+            ShortcutPasteAction::Text(text) => self.handle_paste(text),
+            ShortcutPasteAction::Image { path, info } => {
+                tracing::debug!(
+                    "pasted image size={}x{} format={}",
+                    info.width,
+                    info.height,
+                    info.encoded_format.label()
+                );
+                self.attach_image(path);
+            }
+            ShortcutPasteAction::Error(message) => {
+                warn!("{message}");
+                self.add_to_history(history_cell::new_error_event(message));
+            }
+        }
+
+        true
     }
 
     /// Attach a local image to the composer when the active model supports image inputs.
@@ -10335,6 +10375,14 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn is_task_running_for_test(&self) -> bool {
         self.bottom_pane.is_task_running()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_shortcut_paste_handler_for_test(
+        &mut self,
+        handler: fn(ShortcutPasteRequest) -> ShortcutPasteAction,
+    ) {
+        self.shortcut_paste_handler = Some(handler);
     }
 
     pub(crate) fn submit_user_message_with_mode(
