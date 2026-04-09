@@ -118,6 +118,29 @@ still available for `Ctrl+Y`. This supports flows where a user kills part of a d
 composer action such as changing reasoning level, and then yanks that text back into the cleared
 draft.
 
+## Undo last paste
+
+The composer supports a narrow “undo last paste” shortcut rather than a general edit-history stack.
+
+- Primary shortcut: `Ctrl+_`
+- Terminal-friendly aliases: `Ctrl+/` and raw `^_` delivery
+
+This feature is composer-level, not textarea-level, because paste can mutate more than raw text:
+
+- normal pasted text,
+- large-paste placeholders plus `pending_pastes`,
+- local image attachments created from pasted image paths,
+- shortcut image pastes that attach an image directly.
+
+Behavior:
+
+- On each successful paste transaction, the composer snapshots the full pre-paste draft.
+- It also records a fingerprint of the post-paste draft content.
+- Undo only succeeds if the current draft content still matches that post-paste fingerprint.
+- Pure cursor movement does not block undo.
+- Any content mutation after the paste makes undo unavailable.
+- The feature is single-level only; there is no redo or multi-step undo chain.
+
 ## Remote image rows (selection/deletion flow)
 
 Remote image URLs are shown as `[Image #N]` rows above the textarea, inside the same composer box.

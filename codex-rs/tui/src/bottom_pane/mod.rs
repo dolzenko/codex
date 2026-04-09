@@ -501,6 +501,15 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn handle_pasted_image(&mut self, path: PathBuf) {
+        if self.view_stack.is_empty() {
+            let needs_redraw = self.composer.handle_pasted_image(path);
+            if needs_redraw {
+                self.request_redraw();
+            }
+        }
+    }
+
     pub(crate) fn insert_str(&mut self, text: &str) {
         self.composer.insert_str(text);
         self.composer.sync_popups();
@@ -1091,6 +1100,7 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn attach_image(&mut self, path: PathBuf) {
         if self.view_stack.is_empty() {
             self.composer.attach_image(path);

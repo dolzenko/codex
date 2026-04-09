@@ -56,6 +56,19 @@ async fn ctrl_v_can_attach_an_image_when_the_shortcut_policy_falls_back_to_image
 }
 
 #[tokio::test]
+async fn undo_last_paste_removes_an_image_inserted_via_ctrl_v_shortcut() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_shortcut_paste_handler_for_test(shortcut_paste_image);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+
+    assert!(chat.bottom_pane.composer_local_image_paths().is_empty());
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
 async fn alt_v_uses_the_same_shortcut_paste_resolution_path() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_shortcut_paste_handler_for_test(shortcut_paste_text);

@@ -239,6 +239,33 @@ struct AttachedImage {
     path: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ComposerDraftSnapshot {
+    text: String,
+    text_elements: Vec<TextElement>,
+    local_image_paths: Vec<PathBuf>,
+    remote_image_urls: Vec<String>,
+    mention_bindings: Vec<MentionBinding>,
+    pending_pastes: Vec<(String, String)>,
+    cursor: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ComposerDraftFingerprint {
+    text: String,
+    text_elements: Vec<TextElement>,
+    local_image_paths: Vec<PathBuf>,
+    remote_image_urls: Vec<String>,
+    mention_bindings: Vec<MentionBinding>,
+    pending_pastes: Vec<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PasteUndoSnapshot {
+    before: ComposerDraftSnapshot,
+    after: ComposerDraftFingerprint,
+}
+
 /// Feature flags for reusing the chat composer in other bottom-pane surfaces.
 ///
 /// The default keeps today's behavior intact. Other call sites can opt out of
@@ -290,6 +317,7 @@ pub(crate) struct ChatComposer {
     dismissed_file_popup_token: Option<String>,
     current_file_query: Option<String>,
     pending_pastes: Vec<(String, String)>,
+    last_paste_undo: Option<PasteUndoSnapshot>,
     large_paste_counters: HashMap<usize, usize>,
     has_focus: bool,
     frame_requester: Option<FrameRequester>,
@@ -420,6 +448,7 @@ impl ChatComposer {
             dismissed_file_popup_token: None,
             current_file_query: None,
             pending_pastes: Vec::new(),
+            last_paste_undo: None,
             large_paste_counters: HashMap::new(),
             has_focus: has_input_focus,
             frame_requester: None,
@@ -683,6 +712,7 @@ impl ChatComposer {
     /// In all cases, clears any paste-burst Enter suppression state so a real paste cannot affect
     /// the next user Enter key, then syncs popup state.
     pub fn handle_paste(&mut self, pasted: String) -> bool {
+        let before = self.capture_full_draft_snapshot();
         let pasted = pasted.replace("\r\n", "\n").replace('\r', "\n");
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
@@ -699,6 +729,15 @@ impl ChatComposer {
         }
         self.paste_burst.clear_after_explicit_paste();
         self.sync_popups();
+        self.record_paste_undo_snapshot(before);
+        true
+    }
+
+    pub(crate) fn handle_pasted_image(&mut self, path: PathBuf) -> bool {
+        let before = self.capture_full_draft_snapshot();
+        self.attach_image(path);
+        self.sync_popups();
+        self.record_paste_undo_snapshot(before);
         true
     }
 
@@ -847,6 +886,94 @@ impl ChatComposer {
             .into_iter()
             .filter(|(placeholder, _)| text.contains(placeholder))
             .collect();
+    }
+
+    fn capture_full_draft_snapshot(&self) -> ComposerDraftSnapshot {
+        ComposerDraftSnapshot {
+            text: self.textarea.text().to_string(),
+            text_elements: self.textarea.text_elements(),
+            local_image_paths: self
+                .attached_images
+                .iter()
+                .map(|img| img.path.clone())
+                .collect(),
+            remote_image_urls: self.remote_image_urls.clone(),
+            mention_bindings: self.snapshot_mention_bindings(),
+            pending_pastes: self.pending_pastes.clone(),
+            cursor: self.textarea.cursor(),
+        }
+    }
+
+    fn capture_draft_fingerprint(&self) -> ComposerDraftFingerprint {
+        ComposerDraftFingerprint {
+            text: self.textarea.text().to_string(),
+            text_elements: self.textarea.text_elements(),
+            local_image_paths: self
+                .attached_images
+                .iter()
+                .map(|img| img.path.clone())
+                .collect(),
+            remote_image_urls: self.remote_image_urls.clone(),
+            mention_bindings: self.snapshot_mention_bindings(),
+            pending_pastes: self.pending_pastes.clone(),
+        }
+    }
+
+    fn restore_full_draft_snapshot(&mut self, snapshot: ComposerDraftSnapshot) {
+        let ComposerDraftSnapshot {
+            text,
+            text_elements,
+            local_image_paths,
+            remote_image_urls,
+            mention_bindings,
+            pending_pastes,
+            cursor,
+        } = snapshot;
+        self.set_remote_image_urls(remote_image_urls);
+        self.set_text_content_with_mention_bindings(
+            text,
+            text_elements,
+            local_image_paths,
+            mention_bindings,
+        );
+        self.set_pending_pastes(pending_pastes);
+        self.textarea.set_cursor(cursor);
+        self.sync_popups();
+    }
+
+    fn record_paste_undo_snapshot(&mut self, before: ComposerDraftSnapshot) {
+        self.last_paste_undo = Some(PasteUndoSnapshot {
+            before,
+            after: self.capture_draft_fingerprint(),
+        });
+    }
+
+    fn handle_undo_last_paste(&mut self) -> bool {
+        let Some(snapshot) = self.last_paste_undo.take() else {
+            return false;
+        };
+        if self.capture_draft_fingerprint() != snapshot.after {
+            return false;
+        }
+        self.restore_full_draft_snapshot(snapshot.before);
+        true
+    }
+
+    fn is_undo_last_paste_key(key_event: KeyEvent) -> bool {
+        matches!(
+            key_event,
+            KeyEvent {
+                code: KeyCode::Char('_' | '/'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            } | KeyEvent {
+                code: KeyCode::Char('\u{001f}'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press | KeyEventKind::Repeat,
+                ..
+            }
+        )
     }
 
     /// Override the footer hint items displayed beneath the composer. Passing
@@ -1201,6 +1328,10 @@ impl ChatComposer {
 
         if matches!(key_event.kind, KeyEventKind::Release) {
             return (InputResult::None, false);
+        }
+
+        if Self::is_undo_last_paste_key(key_event) {
+            return (InputResult::None, self.handle_undo_last_paste());
         }
 
         let result = match &mut self.active_popup {
@@ -3796,6 +3927,18 @@ mod tests {
     use crate::bottom_pane::chat_composer::LARGE_PASTE_CHAR_THRESHOLD;
     use crate::bottom_pane::textarea::TextArea;
     use tokio::sync::mpsc::unbounded_channel;
+
+    fn test_composer() -> ChatComposer {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        )
+    }
 
     #[test]
     fn footer_hint_row_is_separated_from_composer() {
@@ -7171,15 +7314,7 @@ mod tests {
 
     #[test]
     fn pasted_crlf_normalizes_newlines_for_elements() {
-        let (tx, _rx) = unbounded_channel::<AppEvent>();
-        let sender = AppEventSender::new(tx);
-        let mut composer = ChatComposer::new(
-            /*has_input_focus*/ true,
-            sender,
-            /*enhanced_keys_supported*/ false,
-            "Ask Codex to do anything".to_string(),
-            /*disable_paste_burst*/ false,
-        );
+        let mut composer = test_composer();
 
         let pasted = "line1\r\nline2\r\n".to_string();
         composer.handle_paste(pasted);
@@ -7210,6 +7345,87 @@ mod tests {
         }
         let imgs = composer.take_recent_submission_images();
         assert_eq!(vec![path], imgs);
+    }
+
+    #[test]
+    fn undo_last_paste_restores_text_and_cursor_after_navigation() {
+        let mut composer = test_composer();
+        composer.set_text_content("before".to_string(), Vec::new(), Vec::new());
+        composer.textarea.set_cursor(2);
+
+        composer.handle_paste("CLIP".to_string());
+        assert_eq!(composer.textarea.text(), "beCLIPfore");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "before");
+        assert_eq!(composer.textarea.cursor(), 2);
+    }
+
+    #[test]
+    fn undo_last_paste_restores_large_paste_placeholder_and_payloads() {
+        let mut composer = test_composer();
+        composer.set_text_content("prefix ".to_string(), Vec::new(), Vec::new());
+        let large_content = "x".repeat(LARGE_PASTE_CHAR_THRESHOLD + 5);
+
+        composer.handle_paste(large_content);
+        assert_eq!(composer.pending_pastes.len(), 1);
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('_'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "prefix ");
+        assert!(composer.pending_pastes.is_empty());
+    }
+
+    #[test]
+    fn undo_last_paste_restores_shortcut_image_attach() {
+        let mut composer = test_composer();
+        composer.set_text_content("describe ".to_string(), Vec::new(), Vec::new());
+        composer.textarea.set_cursor(composer.textarea.text().len());
+
+        composer.handle_pasted_image(PathBuf::from("/tmp/from-shortcut.png"));
+        assert_eq!(composer.textarea.text(), "describe [Image #1]");
+        assert_eq!(composer.attached_images.len(), 1);
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "describe ");
+        assert!(composer.attached_images.is_empty());
+    }
+
+    #[test]
+    fn undo_last_paste_accepts_raw_control_char_fallback() {
+        let mut composer = test_composer();
+        composer.handle_paste("clipboard".to_string());
+        assert_eq!(composer.textarea.text(), "clipboard");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('\u{001f}'), KeyModifiers::NONE));
+
+        assert_eq!(composer.textarea.text(), "");
+    }
+
+    #[test]
+    fn undo_last_paste_is_invalidated_by_content_edits() {
+        let mut composer = test_composer();
+        composer.handle_paste("clipboard".to_string());
+        composer.insert_str("!");
+        assert_eq!(composer.textarea.text(), "clipboard!");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "clipboard!");
+    }
+
+    #[test]
+    fn undo_last_paste_is_one_shot() {
+        let mut composer = test_composer();
+        composer.handle_paste("clipboard".to_string());
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+        assert_eq!(composer.textarea.text(), "");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL));
+        assert_eq!(composer.textarea.text(), "");
     }
 
     #[test]
