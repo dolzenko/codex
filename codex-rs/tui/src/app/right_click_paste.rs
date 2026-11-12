@@ -1,4 +1,4 @@
-//! Clipboard text paste from Windows shortcuts, right-click, or X11 middle-click PRIMARY.
+//! Clipboard text paste from Windows shortcuts, right-click, or local middle-click PRIMARY.
 //! The policy also reports why a configured mode is unavailable in this terminal.
 //! Existing selection handlers run first. Only a draw may deliver a read, so real input
 //! invalidates pending paste before completion and is never replaced by clipboard text.

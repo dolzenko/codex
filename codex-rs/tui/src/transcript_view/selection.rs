@@ -433,7 +433,7 @@ impl TranscriptView {
 
     /// Apply selection copy keys consistently in owned, overlay and rendered-region views.
     /// Plain UI regions keep their visible text; transcript copies retain Markdown metadata.
-    /// PRIMARY is always plaintext, and automatic copies update both X11 selections.
+    /// PRIMARY is always plaintext, and automatic copies update PRIMARY and CLIPBOARD.
     pub(crate) fn copy_action(
         &mut self,
         tui: &mut Tui,
